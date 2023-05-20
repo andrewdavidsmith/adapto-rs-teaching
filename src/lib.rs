@@ -51,10 +51,9 @@ fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
 }
 
 
-fn kmp(adaptor: &[u8], read: &Vec<u8>, sp: &[usize]) -> usize {
+fn kmp(adaptor: &[u8], read: &Vec<u8>, m: usize, sp: &[usize]) -> usize {
 
     let n = adaptor.len();
-    let m = read.len();
 
     let mut j: usize = 0;
     let mut i: usize = 0;
@@ -85,8 +84,15 @@ fn kmp(adaptor: &[u8], read: &Vec<u8>, sp: &[usize]) -> usize {
 
 
 fn trim_n_ends(read: &Vec<u8>) -> (usize, usize) {
-    (read.iter().position(|&x| x != b'N').unwrap(),
-     read.iter().rposition(|&x| x != b'N').unwrap() + 1)
+    let start = match read.iter().position(|&x| x != b'N') {
+        Some(x) => x,
+        _ => 0,
+    };
+    let stop = match read.iter().rposition(|&x| x != b'N') {
+        Some(x) => x + 1,
+        _ => 0,
+    };
+    (start, stop)
 }
 
 
@@ -109,9 +115,12 @@ fn start_stop(sp: &Vec<usize>, read: &Vec<u8>, qual: &Vec<u8>, cutoff: u8)
     let (qstart, qstop) = trim_qual_ends(&qual, cutoff + QUAL_BASE);
     // consecutive N values at both ends
     let (nstart, nstop) = trim_n_ends(&read);
+    // do not allow any N or low qual bases to interfere with adaptor
+    let stop = min(qstop, nstop);
     // find the adaptor at the 3' end
-    let a = kmp(ADAPTOR, &read, &sp);
-    (max(qstart, nstart), min(min(qstop, nstop), a))
+    let adaptor_start = kmp(ADAPTOR, &read, stop, &sp);
+
+    (max(qstart, nstart), min(stop, adaptor_start))
 }
 
 
