@@ -27,9 +27,6 @@
 use clap::Parser;
 use std::process::ExitCode;
 
-use radapt::process_reads;
-use radapt::process_reads_pe;
-
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -67,17 +64,14 @@ fn main() -> ExitCode {
 
     if let Some(pfastq) = args.pfastq {
         if let Some(pout) = args.pout {
-            process_reads_pe(args.verbose, &args.fastq, &pfastq,
-                             &args.out, &pout, args.qual_cutoff).unwrap();
+            radapt::process_reads(&pfastq, &pout, args.qual_cutoff).unwrap();
         }
         else {
             eprintln!("specifying two inputs requires two outputs");
             return ExitCode::FAILURE;
         }
     }
-    else {
-        process_reads(args.verbose, &args.fastq,
-                      &args.out, args.qual_cutoff).unwrap();
-    }
+    radapt::process_reads(&args.fastq, &args.out, args.qual_cutoff).unwrap();
+
     ExitCode::SUCCESS
 }

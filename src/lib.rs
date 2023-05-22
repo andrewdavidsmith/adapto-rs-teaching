@@ -37,7 +37,6 @@ fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
     let n = p.len();
     let mut sp = vec![0 as usize; n];
     let mut k = 0usize;
-
     for i in 1..n {
         while k > 0 && p[k] != p[i] {
             k = sp[k - 1];
@@ -51,25 +50,20 @@ fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
 }
 
 
-fn kmp(adaptor: &[u8], read: &Vec<u8>, m: usize, sp: &[usize]) -> usize {
-
+fn kmp(adaptor: &[u8], sp: &[usize], read: &[u8], m: usize) -> usize {
     let n = adaptor.len();
-
     let mut j: usize = 0;
     let mut i: usize = 0;
     while i < m {
-
         // look for the longest prefix of P that is the same as a
         // suffix of P[1..j - 1] AND has a different next character
         while j > 0 && adaptor[j] != read[i] {
             j = sp[j - 1];
         }
-
         // check if the character matches
         if adaptor[j] == read[i] {
             j += 1;
         }
-
         // if we have already successfully compared all positions in
         // P, then we have found a match
         if j == n {
@@ -83,7 +77,7 @@ fn kmp(adaptor: &[u8], read: &Vec<u8>, m: usize, sp: &[usize]) -> usize {
 }
 
 
-fn trim_n_ends(read: &Vec<u8>) -> (usize, usize) {
+fn trim_n_ends(read: &[u8]) -> (usize, usize) {
     let start = match read.iter().position(|&x| x != b'N') {
         Some(x) => x,
         _ => 0,
@@ -96,215 +90,137 @@ fn trim_n_ends(read: &Vec<u8>) -> (usize, usize) {
 }
 
 
-fn trim_qual_ends(qual: &Vec<u8>, cutoff: u8) -> (usize, usize) {
-    let start = match qual.iter().position(|&x| x >= cutoff) {
-        Some(x) => x,
-        _ => 0,
-    };
-    let stop = match qual.iter().rposition(|&x| x >= cutoff) {
-        Some(x) => x + 1,
-        _ => 0,
-    };
-    (start, stop)
+fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
+             -> (usize, usize) {
+    /* ADS: COPIED FROM cutadapt SOURCE */
+    let n = qual.len();
+    //  find trim position for 5' end
+    let mut start: usize = 0;
+    let mut s: i32 = 0;
+    let mut max_qual: i32 = 0;
+    if cut_front > 0 {
+        for i in 0..n {
+            s += cut_front - (qual[i] as i32 - base);
+            if s < 0 {
+                break;
+            }
+            if s > max_qual {
+                max_qual = s;
+                start = i + 1;
+            }
+        }
+    }
+    // same for 3' end
+    let mut stop: usize = n;
+    max_qual = 0;
+    s = 0;
+    for i in (0..n).rev() {
+        s += cut_back - (qual[i] as i32 - base);
+        if s < 0 {
+            break;
+        }
+        if s > max_qual {
+            max_qual = s;
+            stop = i;
+        }
+    }
+    if start >= stop {
+        (start, stop) = (0, 0)
+    }
+    (start as usize, stop as usize)
 }
 
 
-fn start_stop(sp: &Vec<usize>, read: &Vec<u8>, qual: &Vec<u8>, cutoff: u8)
-              -> (usize, usize) {
-    // quality score cutoff positions at both ends
-    let (qstart, qstop) = trim_qual_ends(&qual, cutoff + QUAL_BASE);
-    // consecutive N values at both ends
-    let (nstart, nstop) = trim_n_ends(&read);
-    // do not allow any N or low qual bases to interfere with adaptor
-    let stop = min(qstop, nstop);
-    // find the adaptor at the 3' end
-    let adaptor_start = kmp(ADAPTOR, &read, stop, &sp);
-
-    (max(qstart, nstart), min(stop, adaptor_start))
+#[derive(Default)]
+struct FQRec {
+    data: Vec<u8>,
+    n: usize, // end of "name"
+    r: usize, // end of "read"
+    o: usize, // end of "other"
+    q: usize, // end of "quality" scores
+    start: usize, // start of good part of seq
+    stop: usize, // stop of good part of seq
 }
 
 
-fn report<W: Write>(
-    out: &mut BufWriter<W>,
-    the_name: &Vec<u8>,
-    the_read: &Vec<u8>,
-    the_qual: &Vec<u8>,
-    start: usize,
-    stop: usize,
-) {
-    out.write(&the_name).unwrap();
-    out.write(&[b'\n']).unwrap();
-    out.write(&the_read[start..stop]).unwrap();
-    out.write(&[b'\n']).unwrap();
-    out.write(&[b'+', b'\n']).unwrap();
-    out.write(&the_qual[start..stop]).unwrap();
-    out.write(&[b'\n']).unwrap();
+impl FQRec {
+    fn set_start_stop(&mut self, sp: &Vec<usize>, cutoff: u8) {
+        // quality score cutoff positions at both ends
+        let (qstart, qstop) = qual_trim(&self.data[self.o..(self.q - 1)], 0,
+                                        cutoff as i32, QUAL_BASE as i32);
+        // consecutive N values at both ends
+        let (nstart, nstop) = trim_n_ends(&self.data[self.n..(self.r - 1)]);
+        // do not allow any N or low qual bases to interfere with adaptor
+        self.stop = min(qstop, nstop);
+        // find the adaptor at the 3' end
+        let adaptor_start =
+            kmp(ADAPTOR, &sp, &self.data[self.n..(self.r - 1)], self.stop);
+        self.stop = min(self.stop, adaptor_start);
+        self.start = min(max(qstart, nstart), self.stop);
+    }
+    fn read_from<R: BufRead>(&mut self, rdr: &mut R) -> bool {
+        // ADS: does not fail if a record is broken, but will ignore it
+        self.data.clear();
+        self.n = rdr.read_until(b'\n', &mut self.data).expect("read fail");
+        self.r = self.n;
+        self.r += rdr.read_until(b'\n', &mut self.data).expect("read fail");
+        self.o = self.r;
+        self.o += rdr.read_until(b'\n', &mut self.data).expect("read fail");
+        self.q = self.o;
+        self.q += rdr.read_until(b'\n', &mut self.data).expect("read fail");
+        self.n != 0 && self.r != 0 && self.o != 0 && self.q != 0
+    }
+    fn write<W: Write>(&mut self, writer: &mut W) {
+        self.data[self.r + 1] = b'\n';
+        self.data[self.n + self.stop] = b'\n';
+        self.data[self.o + self.stop] = b'\n';
+        self.stop += 1;
+        use std::io::IoSlice;
+        writer.write_vectored(
+            &[IoSlice::new(&self.data[..self.n]),
+              IoSlice::new(&self.data[(self.n + self.start)..
+                                      (self.n + self.stop)]),
+              IoSlice::new(&self.data[self.r..self.r + 2]),
+              IoSlice::new(&self.data[(self.o + self.start)..
+                                      (self.o + self.stop)])]).unwrap();
+    }
 }
 
 
-pub fn process_reads(
-    _verbose: bool,
-    input: &String,
-    output: &String,
-    cutoff: u8,
-) -> Result<(), std::io::Error> {
+pub fn process_reads(input: &String, output: &String, cutoff: u8)
+                     -> Result<(), std::io::Error> {
+
+    const BUFFER_SIZE: usize = 128*1024;
+    const FQR_BUFFER_SIZE: usize = 4096;
 
     let sp = kmp_prefix_function(ADAPTOR);
 
-    // setup the input file
-    let mut in_file = BufReader::new(File::open(input).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    }));
+    // ADS: buffered reader and buffer within FQRec is redundant
+    let mut reader =
+        BufReader::with_capacity(BUFFER_SIZE,
+                                 File::open(input).unwrap_or_else(|err| {
+                                     eprintln!("{err}");
+                                     process::exit(1);
+                                 }));
 
-    // setup the output stream
-    let mut out = BufWriter::new(File::create(output).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    }));
+    let mut writer =
+        BufWriter::with_capacity(BUFFER_SIZE,
+                                 File::create(output).unwrap_or_else(|err| {
+                                     eprintln!("{err}");
+                                     process::exit(1);
+                                 }));
 
-    let mut line_idx: usize = 0;
-
+    let mut fq: FQRec = Default::default();
+    fq.data.reserve(FQR_BUFFER_SIZE);
     // iterate over lines in the fastq file
-    let mut read = vec![];
-    let mut name = vec![];
-    let mut buf = vec![];
     loop {
-
-        let n_bytes = in_file.read_until(b'\n', &mut buf)
-            .expect("failed reading fastq");
-        if n_bytes == 0 || buf[n_bytes - 1] != b'\n' {
+        if !fq.read_from(&mut reader) {
             break;
         }
-        buf.truncate(n_bytes - 1);
-
-        if line_idx % 4 == 0 {
-            let t = buf.iter().position(|&x| x == b' ' || x == b'\t').unwrap();
-            buf.truncate(t);
-            name = buf.clone();
-        }
-        else if line_idx % 4 == 1 {
-            read = buf.clone();
-        }
-        // do nothing for '+' line
-        else if line_idx % 4 == 3 {
-            let (a, b) = start_stop(&sp, &read, &buf, cutoff);
-            if a < b {
-                report(&mut out, &name, &read, &buf, a, b);
-            }
-        }
-        line_idx += 1;
-        buf.clear();
+        fq.set_start_stop(&sp, cutoff);
+        fq.write(&mut writer);
     }
-    out.flush().unwrap();
-
-    Ok(())
-}
-
-
-pub fn process_reads_pe(
-    _verbose: bool,
-    input1: &String,
-    input2: &String,
-    output1: &String,
-    output2: &String,
-    cutoff: u8,
-) -> Result<(), std::io::Error> {
-
-    let sp = kmp_prefix_function(ADAPTOR);
-
-    // setup the first input stream
-    let mut in_file1 = BufReader::new(File::open(input1).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    }));
-
-    // setup the first output stream
-    let mut out1 = BufWriter::new(File::create(output1).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    }));
-
-    // setup the second input stream
-    let mut in_file2 = BufReader::new(File::open(input2).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    }));
-
-    // setup the second output stream
-    let mut out2 = BufWriter::new(File::create(output2).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    }));
-
-    let mut line_idx: usize = 0;
-
-    // iterate over lines in the fastq file
-    let mut read1 = vec![];
-    let mut read2 = vec![];
-    let mut name1 = vec![];
-    let mut name2 = vec![];
-    let mut buf1 = vec![];
-    let mut buf2 = vec![];
-    loop {
-
-        let n_bytes1 = in_file1.read_until(b'\n', &mut buf1)
-            .expect("failed reading end1 fastq");
-        if n_bytes1 == 0 || buf1[n_bytes1 - 1] != b'\n' {
-            break;
-        }
-        buf1.truncate(n_bytes1 - 1);
-
-        let n_bytes2 = in_file2.read_until(b'\n', &mut buf2)
-            .expect("failed reading end2 fastq");
-        if n_bytes2 == 0 || buf2[n_bytes2 - 1] != b'\n' {
-            break;
-        }
-        buf2.truncate(n_bytes2 - 1);
-
-        if line_idx % 4 == 0 {
-            let y = buf1.iter().position(|&x| x == b' ' || x == b'\t').unwrap();
-            buf1.truncate(y);
-            name1 = buf1.clone();
-
-            let y = buf2.iter().position(|&x| x == b' ' || x == b'\t').unwrap();
-            buf2.truncate(y);
-            name2 = buf2.clone();
-        }
-        else if line_idx % 4 == 1 {
-            read1 = buf1.clone();
-            read2 = buf2.clone();
-        }
-        else if line_idx % 4 == 3 {
-
-            let (mut a1, mut b1) = start_stop(&sp, &read1, &buf1, cutoff);
-            let (mut a2, mut b2) = start_stop(&sp, &read2, &buf2, cutoff);
-
-            let first_is_good = a1 < b1;
-            let second_is_good = a2 < b2;
-
-            if first_is_good || second_is_good {
-                if !first_is_good {
-                    (a1, b1) = (0, 1);
-                    read1[0] = b'N';
-                    buf1[0] = b'B';
-                }
-                report(&mut out1, &name1, &read1, &buf1, a1, b1);
-
-                if !second_is_good {
-                    (a2, b2) = (0, 1);
-                    read2[0] = b'N';
-                    buf2[0] = b'B';
-                }
-                report(&mut out2, &name2, &read2, &buf2, a2, b2);
-            }
-        }
-        line_idx += 1;
-        buf1.clear();
-        buf2.clear();
-    }
-    out1.flush().unwrap();
-    out2.flush().unwrap();
+    writer.flush().unwrap();
 
     Ok(())
 }
