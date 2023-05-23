@@ -24,7 +24,7 @@
  */
 
 use std::fs::File;
-use std::io::{prelude::*,BufReader,BufWriter,Write};
+use std::io::{prelude::*,BufWriter,Write};
 use std::process;
 use std::cmp::{max, min};
 
@@ -94,13 +94,16 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
              -> (usize, usize) {
     /* ADS: COPIED FROM cutadapt SOURCE */
     let n = qual.len();
+
     //  find trim position for 5' end
     let mut start: usize = 0;
     let mut s: i32 = 0;
     let mut max_qual: i32 = 0;
+
     if cut_front > 0 {
+        let cut_front = cut_front + base;
         for i in 0..n {
-            s += cut_front - (qual[i] as i32 - base);
+            s += (cut_front + base) - qual[i] as i32;
             if s < 0 {
                 break;
             }
@@ -114,8 +117,9 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
     let mut stop: usize = n;
     max_qual = 0;
     s = 0;
+    let cut_back = cut_back + base;
     for i in (0..n).rev() {
-        s += cut_back - (qual[i] as i32 - base);
+        s += cut_back - qual[i] as i32;
         if s < 0 {
             break;
         }
@@ -132,57 +136,88 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
 
 
 #[derive(Default)]
+struct FQBuf {
+    buf: Vec<u8>,
+    pos: usize, // current offset into buf, must always be <= `filled`.
+    filled: usize,
+}
+
+
+impl FQBuf {
+    fn shift(&mut self) {
+        let mut j = 0;
+        for i in self.pos..self.filled {
+            self.buf[j] = self.buf[i];
+            j += 1;
+        }
+        self.filled = j;
+        self.pos = 0;
+    }
+    fn next_newline(&self, offset: usize) -> usize {
+        for i in offset..self.filled {
+            if self.buf[i] == b'\n' {
+                return i;
+            }
+        }
+        0
+    }
+}
+
+
+#[derive(Default)]
 struct FQRec {
-    data: Vec<u8>,
-    n: usize, // end of "name"
-    r: usize, // end of "read"
-    o: usize, // end of "other"
-    q: usize, // end of "quality" scores
+    n: usize, // start of "name"
+    r: usize, // start of "read"
+    o: usize, // start of "other"
+    q: usize, // start of "quality" scores
     start: usize, // start of good part of seq
     stop: usize, // stop of good part of seq
 }
 
 
 impl FQRec {
-    fn set_start_stop(&mut self, sp: &Vec<usize>, cutoff: u8) {
-        // quality score cutoff positions at both ends
-        let (qstart, qstop) = qual_trim(&self.data[self.o..(self.q - 1)], 0,
+    fn set_start_stop(&mut self, sp: &Vec<usize>, cutoff: u8, buf: &FQBuf) {
+        let x = buf.pos - 1;
+        let (qstart, qstop) = qual_trim(&buf.buf[self.q..x], 0,
                                         cutoff as i32, QUAL_BASE as i32);
         // consecutive N values at both ends
-        let (nstart, nstop) = trim_n_ends(&self.data[self.n..(self.r - 1)]);
+        let x = self.o - 1;
+        let (nstart, nstop) = trim_n_ends(&buf.buf[self.r..x]);
         // do not allow any N or low qual bases to interfere with adaptor
         self.stop = min(qstop, nstop);
         // find the adaptor at the 3' end
-        let adaptor_start =
-            kmp(ADAPTOR, &sp, &self.data[self.n..(self.r - 1)], self.stop);
+        let adaptor_start = kmp(ADAPTOR, &sp, &buf.buf[self.r..x], self.stop);
         self.stop = min(self.stop, adaptor_start);
         self.start = min(max(qstart, nstart), self.stop);
     }
-    fn read_from<R: BufRead>(&mut self, rdr: &mut R) -> bool {
+    fn find_record_from_buf(&mut self, buf: &mut FQBuf) -> bool {
         // ADS: does not fail if a record is broken, but will ignore it
-        self.data.clear();
-        self.n = rdr.read_until(b'\n', &mut self.data).expect("read fail");
-        self.r = self.n;
-        self.r += rdr.read_until(b'\n', &mut self.data).expect("read fail");
-        self.o = self.r;
-        self.o += rdr.read_until(b'\n', &mut self.data).expect("read fail");
-        self.q = self.o;
-        self.q += rdr.read_until(b'\n', &mut self.data).expect("read fail");
-        self.n != 0 && self.r != 0 && self.o != 0 && self.q != 0
+        self.r = buf.next_newline(buf.pos) + 1;
+        self.o = buf.next_newline(self.r) + 1;
+        self.q = buf.next_newline(self.o) + 1;
+        self.n = buf.next_newline(self.q) + 1; // to swap later!!!
+        if self.r > 1 && self.o > 1 && self.q > 1 && self.n > 1 {
+            (self.n, buf.pos) = (buf.pos, self.n);
+            return true;
+        }
+        else {
+            return false;
+        }
     }
-    fn write<W: Write>(&mut self, writer: &mut W) {
-        self.data[self.r + 1] = b'\n';
-        self.data[self.n + self.stop] = b'\n';
-        self.data[self.o + self.stop] = b'\n';
+    fn write<W: Write>(&mut self, buf: &mut FQBuf, writer: &mut W) {
+        buf.buf[self.o + 1] = b'\n';
+        buf.buf[self.r + self.stop] = b'\n';
+        buf.buf[self.q + self.stop] = b'\n';
         self.stop += 1;
         use std::io::IoSlice;
         writer.write_vectored(
-            &[IoSlice::new(&self.data[..self.n]),
-              IoSlice::new(&self.data[(self.n + self.start)..
-                                      (self.n + self.stop)]),
-              IoSlice::new(&self.data[self.r..self.r + 2]),
-              IoSlice::new(&self.data[(self.o + self.start)..
-                                      (self.o + self.stop)])]).unwrap();
+            &[IoSlice::new(&buf.buf[self.n..self.r]),
+              IoSlice::new(&buf.buf[(self.r + self.start)..
+                                    (self.r + self.stop)]),
+              IoSlice::new(&buf.buf[self.o..(self.o + 2)]),
+              IoSlice::new(&buf.buf[(self.q + self.start)..
+                                    (self.q + self.stop)]),
+            ]).unwrap();
     }
 }
 
@@ -191,17 +226,13 @@ pub fn process_reads(input: &String, output: &String, cutoff: u8)
                      -> Result<(), std::io::Error> {
 
     const BUFFER_SIZE: usize = 128*1024;
-    const FQR_BUFFER_SIZE: usize = 4096;
 
     let sp = kmp_prefix_function(ADAPTOR);
 
-    // ADS: buffered reader and buffer within FQRec is redundant
-    let mut reader =
-        BufReader::with_capacity(BUFFER_SIZE,
-                                 File::open(input).unwrap_or_else(|err| {
-                                     eprintln!("{err}");
-                                     process::exit(1);
-                                 }));
+    let mut reader = File::open(input).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        process::exit(1);
+    });
 
     let mut writer =
         BufWriter::with_capacity(BUFFER_SIZE,
@@ -210,15 +241,33 @@ pub fn process_reads(input: &String, output: &String, cutoff: u8)
                                      process::exit(1);
                                  }));
 
+    let mut buf: FQBuf = Default::default();
+    buf.buf.resize(BUFFER_SIZE, b'\0');
+    // let mut buf = FQBuf { buf: vec![0; BUFFER_SIZE], pos: 0, filled: 0 };
+
     let mut fq: FQRec = Default::default();
-    fq.data.reserve(FQR_BUFFER_SIZE);
-    // iterate over lines in the fastq file
+
+    buf.filled += reader.read(&mut buf.buf[buf.filled..]).unwrap();
+
+    let mut found_rec;
+    let mut data_exhausted = false;
+
     loop {
-        if !fq.read_from(&mut reader) {
+        loop {
+            found_rec = fq.find_record_from_buf(&mut buf);
+            if found_rec || data_exhausted {
+                break;
+            }
+            // reload the buffer
+            buf.shift();
+            buf.filled += reader.read(&mut buf.buf[buf.filled..]).unwrap();
+            data_exhausted = buf.filled < buf.buf.len();
+        }
+        if !found_rec && data_exhausted {
             break;
         }
-        fq.set_start_stop(&sp, cutoff);
-        fq.write(&mut writer);
+        fq.set_start_stop(&sp, cutoff, &buf);
+        fq.write(&mut buf, &mut writer);
     }
     writer.flush().unwrap();
 
