@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.2.7", features = ["derive"] }
+rust-htslib = { version = "*", default-features = false }
