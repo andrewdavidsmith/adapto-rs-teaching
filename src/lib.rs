@@ -23,16 +23,18 @@
  * SOFTWARE.
  */
 
-use std::fs::File;
-use std::io::{prelude::*,BufWriter,Write};
+use std::io::{Write,Read};
 use std::process;
 use std::cmp::{max, min};
 
 
-const ADAPTOR: &[u8] = b"AGATCGGAAGAGC";
-const QUAL_BASE: u8 = 33;
+// ADS: this works well, but imports way more than is
+// needed. Considering `gzp`
+use rust_htslib::bgzf;
+use rust_htslib::tpool::ThreadPool;
 
 
+/// The prefix function for the KMP algorithm
 fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
     let n = p.len();
     let mut sp = vec![0 as usize; n];
@@ -50,6 +52,8 @@ fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
 }
 
 
+/// The KMP algorithm that returns the first full match or the start
+/// of any suffix match to the pattern (i.e. adaptor).
 fn kmp(adaptor: &[u8], sp: &[usize], read: &[u8], m: usize) -> usize {
     let n = adaptor.len();
     let mut j: usize = 0;
@@ -77,6 +81,7 @@ fn kmp(adaptor: &[u8], sp: &[usize], read: &[u8], m: usize) -> usize {
 }
 
 
+/// Find the positions in the read of the first non-N and last non-N.
 fn trim_n_ends(read: &[u8]) -> (usize, usize) {
     let start = match read.iter().position(|&x| x != b'N') {
         Some(x) => x,
@@ -90,8 +95,13 @@ fn trim_n_ends(read: &[u8]) -> (usize, usize) {
 }
 
 
-fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
+/// Find the positions in the read where quality scores indicate the
+/// read should be trimmed. This is copied from cutadapt source.
+fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32)
              -> (usize, usize) {
+
+    const QUAL_BASE: i32 = 33; // assumes base quality starts at 33
+
     /* ADS: COPIED FROM cutadapt SOURCE */
     let n = qual.len();
 
@@ -101,9 +111,9 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
     let mut max_qual: i32 = 0;
 
     if cut_front > 0 {
-        let cut_front = cut_front + base;
+        let cut_front = cut_front + QUAL_BASE;
         for i in 0..n {
-            s += (cut_front + base) - qual[i] as i32;
+            s += (cut_front + QUAL_BASE) - qual[i] as i32;
             if s < 0 {
                 break;
             }
@@ -117,7 +127,7 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
     let mut stop: usize = n;
     max_qual = 0;
     s = 0;
-    let cut_back = cut_back + base;
+    let cut_back = cut_back + QUAL_BASE;
     for i in (0..n).rev() {
         s += cut_back - qual[i] as i32;
         if s < 0 {
@@ -135,6 +145,8 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32, base: i32)
 }
 
 
+/// FQBuf is just a buffer that keeps a cursor (position) and how much
+/// of the buffer is filled.
 #[derive(Default)]
 struct FQBuf {
     buf: Vec<u8>,
@@ -164,30 +176,40 @@ impl FQBuf {
 }
 
 
+/// FQRec is a FASTQ record that represents the position of the start
+/// of the name (n), the start of the read sequence (r), the start of
+/// the other name, the one with the "+" (o), and the start of the
+/// quality scores (q). The `start` and `stop` variables are used to
+/// store the offsets of trimmed ends for the read and quality scores
+/// strings.
 #[derive(Default)]
 struct FQRec {
     n: usize, // start of "name"
     r: usize, // start of "read"
     o: usize, // start of "other"
     q: usize, // start of "quality" scores
-    start: usize, // start of good part of seq
-    stop: usize, // stop of good part of seq
+    start: usize, // *start* of good part of seq
+    stop: usize, // *stop* of good part of seq
 }
 
 
 impl FQRec {
-    fn set_start_stop(&mut self, sp: &Vec<usize>, cutoff: u8, buf: &FQBuf) {
+    fn set_start_stop(&mut self,
+                      adaptor: &[u8],
+                      sp: &Vec<usize>, cutoff: u8, buf: &FQBuf) {
         let x = buf.pos - 1;
-        let (qstart, qstop) = qual_trim(&buf.buf[self.q..x], 0,
-                                        cutoff as i32, QUAL_BASE as i32);
+        let (qstart, qstop) = qual_trim(&buf.buf[self.q..x], 0, cutoff as i32);
         // consecutive N values at both ends
         let x = self.o - 1;
         let (nstart, nstop) = trim_n_ends(&buf.buf[self.r..x]);
         // do not allow any N or low qual bases to interfere with adaptor
         self.stop = min(qstop, nstop);
         // find the adaptor at the 3' end
-        let adaptor_start = kmp(ADAPTOR, &sp, &buf.buf[self.r..x], self.stop);
+        let adaptor_start = kmp(adaptor, &sp, &buf.buf[self.r..x], self.stop);
         self.stop = min(self.stop, adaptor_start);
+        let x = self.r + self.stop;
+        let (_, nstop) = trim_n_ends(&buf.buf[self.r..x]);
+        self.stop = min(self.stop, nstop);
         self.start = min(max(qstart, nstart), self.stop);
     }
     fn find_record_from_buf(&mut self, buf: &mut FQBuf) -> bool {
@@ -209,47 +231,71 @@ impl FQRec {
         buf.buf[self.r + self.stop] = b'\n';
         buf.buf[self.q + self.stop] = b'\n';
         self.stop += 1;
-        use std::io::IoSlice;
-        writer.write_vectored(
-            &[IoSlice::new(&buf.buf[self.n..self.r]),
-              IoSlice::new(&buf.buf[(self.r + self.start)..
-                                    (self.r + self.stop)]),
-              IoSlice::new(&buf.buf[self.o..(self.o + 2)]),
-              IoSlice::new(&buf.buf[(self.q + self.start)..
-                                    (self.q + self.stop)]),
-            ]).unwrap();
+        /* ADS: below, this will compile with bgzf, but it segfaults */
+        // use std::io::IoSlice;
+        // writer.write_vectored(
+        //     &[IoSlice::new(&buf.buf[self.n..self.r]),
+        //       IoSlice::new(&buf.buf[(self.r + self.start)..
+        //                             (self.r + self.stop)]),
+        //       IoSlice::new(&buf.buf[self.o..(self.o + 2)]),
+        //       IoSlice::new(&buf.buf[(self.q + self.start)..
+        //                             (self.q + self.stop)]),
+        //     ]).unwrap();
+        writer.write(&buf.buf[self.n..self.r]).unwrap();
+        writer.write(&buf.buf[(self.r + self.start)..(self.r + self.stop)]).unwrap();
+        writer.write(&buf.buf[self.o..(self.o + 2)]).unwrap();
+        writer.write(&buf.buf[(self.q + self.start)..(self.q + self.stop)]).unwrap();
     }
 }
 
 
-pub fn process_reads(input: &String, output: &String, cutoff: u8)
-                     -> Result<(), std::io::Error> {
+pub fn process_reads(
+    _zip: bool,
+    n_threads: u32,
+    buffer_size: usize,
+    adaptor: &[u8],
+    input: &String,
+    output: &String,
+    cutoff: u8
+) -> Result<(), std::io::Error> {
 
-    const BUFFER_SIZE: usize = 128*1024;
+    let sp = kmp_prefix_function(adaptor);
 
-    let sp = kmp_prefix_function(ADAPTOR);
-
-    let mut reader = File::open(input).unwrap_or_else(|err| {
+    // open the bgzf files for reading and writing
+    let mut reader = bgzf::Reader::from_path(input).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        process::exit(1);
+    });
+    let mut writer = bgzf::Writer::from_path(output).unwrap_or_else(|err| {
         eprintln!("{err}");
         process::exit(1);
     });
 
-    let mut writer =
-        BufWriter::with_capacity(BUFFER_SIZE,
-                                 File::create(output).unwrap_or_else(|err| {
-                                     eprintln!("{err}");
-                                     process::exit(1);
-                                 }));
+    // make a thread pool and give it to the input and output files
+    let tpool = match ThreadPool::new(n_threads) {
+        Ok(p) => p,
+        Err(error) => {
+            eprintln!("failed to acquire threads: {error}");
+            process::exit(1);
+        }
+    };
+    reader.set_thread_pool(&tpool).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        process::exit(1);
+    });
+    writer.set_thread_pool(&tpool).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        process::exit(1);
+    });
 
     let mut buf: FQBuf = Default::default();
-    buf.buf.resize(BUFFER_SIZE, b'\0');
-    // let mut buf = FQBuf { buf: vec![0; BUFFER_SIZE], pos: 0, filled: 0 };
+    buf.buf.resize(buffer_size, b'\0');
 
     let mut fq: FQRec = Default::default();
 
     buf.filled += reader.read(&mut buf.buf[buf.filled..]).unwrap();
 
-    let mut found_rec;
+    let mut found_rec = false;
     let mut data_exhausted = false;
 
     loop {
@@ -258,15 +304,14 @@ pub fn process_reads(input: &String, output: &String, cutoff: u8)
             if found_rec || data_exhausted {
                 break;
             }
-            // reload the buffer
-            buf.shift();
+            buf.shift(); // reload the buffer; not circular...
             buf.filled += reader.read(&mut buf.buf[buf.filled..]).unwrap();
             data_exhausted = buf.filled < buf.buf.len();
         }
         if !found_rec && data_exhausted {
             break;
         }
-        fq.set_start_stop(&sp, cutoff, &buf);
+        fq.set_start_stop(&adaptor, &sp, cutoff, &buf);
         fq.write(&mut buf, &mut writer);
     }
     writer.flush().unwrap();
