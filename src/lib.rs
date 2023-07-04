@@ -271,22 +271,24 @@ pub fn process_reads(
         process::exit(1);
     });
 
-    // make a thread pool and give it to the input and output files
-    let tpool = match ThreadPool::new(n_threads) {
-        Ok(p) => p,
-        Err(error) => {
-            eprintln!("failed to acquire threads: {error}");
+    if n_threads > 1 {
+        // make a thread pool and give it to the input and output files
+        let tpool = match ThreadPool::new(n_threads - 1) {
+            Ok(p) => p,
+            Err(error) => {
+                eprintln!("failed to acquire threads: {error}");
+                process::exit(1);
+            }
+        };
+        reader.set_thread_pool(&tpool).unwrap_or_else(|err| {
+            eprintln!("{err}");
             process::exit(1);
-        }
-    };
-    reader.set_thread_pool(&tpool).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    });
-    writer.set_thread_pool(&tpool).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    });
+        });
+        writer.set_thread_pool(&tpool).unwrap_or_else(|err| {
+            eprintln!("{err}");
+            process::exit(1);
+        });
+    }
 
     let mut buf: FQBuf = Default::default();
     buf.buf.resize(buffer_size, b'\0');
@@ -295,7 +297,7 @@ pub fn process_reads(
 
     buf.filled += reader.read(&mut buf.buf[buf.filled..]).unwrap();
 
-    let mut found_rec = false;
+    let mut found_rec;
     let mut data_exhausted = false;
 
     loop {
