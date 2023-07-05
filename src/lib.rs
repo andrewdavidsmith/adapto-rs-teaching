@@ -24,10 +24,10 @@
  */
 
 use std::io::{Write,Read};
-use std::process;
 use std::cmp::{max, min};
 use std::fmt;
 use std::ptr;
+use std::error::Error;
 
 use rayon::prelude::*;
 
@@ -231,11 +231,14 @@ impl FQRec {
             *b.add(self.r + r_sz) = b'\n';
         }
         let o = self.r + r_sz + 1;
-        let o_sz = self.q - self.o;
+        let o_sz = 2; // self.q - self.o; /* removing "header" after "+" */
         unsafe {
-            ptr::copy(b.add(self.o), b.add(o), o_sz);
-            // newline should already exist because o_sz includes it
-            assert!(*b.add(o + o_sz - 1) == b'\n');
+            // removing the "header" after the "+"
+            *b.add(o) = b'+';
+            *b.add(o + 1) = b'\n';
+            // ptr::copy(b.add(self.o), b.add(o), o_sz);
+            // assert!(*b.add(o + o_sz - 1) == b'\n');
+            // *b.add(o + o_sz - 1) == b'\n');
         }
         self.o = o;
         let q = self.o + o_sz;
@@ -256,6 +259,7 @@ impl FQRec {
 
 
 fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
+    // ADS: here is where we should detect malformed records
     let n = *cursor;
     let r = next_line(buf, filled, n);
     let o = next_line(buf, filled, r);
@@ -263,9 +267,8 @@ fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
     let e = next_line(buf, filled, q);
     if e != usize::MAX {
         *cursor = e;
+        assert!(buf[n] == b'@');
     }
-    // ADS: here is where we would detect a malformed file
-    assert!(buf[n] == b'@');
     FQRec{n, r, o, q, e, start: 0, stop: o - r - 1}
 }
 
@@ -278,38 +281,26 @@ pub fn process_reads(
     input: &String,
     output: &String,
     cutoff: u8
-) -> Result<(), std::io::Error> {
+) -> Result<(), Box<dyn Error>> {
 
     let sp = kmp_prefix_function(adaptor);
 
     // open the bgzf files for reading and writing
-    let mut reader = bgzf::Reader::from_path(input).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    });
-    let mut writer = bgzf::Writer::from_path(output).unwrap_or_else(|err| {
-        eprintln!("{err}");
-        process::exit(1);
-    });
+    let mut reader = match bgzf::Reader::from_path(input) {
+        Ok(file) => file,
+        Err(e) => return Err(Box::new(e)),
+    };
+    let mut writer = match bgzf::Writer::from_path(output) {
+        Ok(file) => file,
+        Err(e) => return Err(Box::new(e)),
+    };
 
+    // If extra threads are available, make a HTSlib pool and use them
+    // for compression/decompression
     if n_threads > 1 {
-        // make a HTSlib thread pool and give it to the input and
-        // output files
-        let tpool = match ThreadPool::new(n_threads - 1) {
-            Ok(p) => p,
-            Err(error) => {
-                eprintln!("failed to acquire threads: {error}");
-                process::exit(1);
-            }
-        };
-        reader.set_thread_pool(&tpool).unwrap_or_else(|err| {
-            eprintln!("{err}");
-            process::exit(1);
-        });
-        writer.set_thread_pool(&tpool).unwrap_or_else(|err| {
-            eprintln!("{err}");
-            process::exit(1);
-        });
+        let tpool = ThreadPool::new(n_threads - 1)?;
+        reader.set_thread_pool(&tpool)?;
+        writer.set_thread_pool(&tpool)?;
     }
 
     rayon::ThreadPoolBuilder::new()
@@ -342,7 +333,8 @@ pub fn process_reads(
 
         // find end-points of trimmed reads
         recs.par_iter_mut().for_each(
-            |x| x.process(&adaptor, &sp, cutoff, &buf)
+            |x|
+            x.process(&adaptor, &sp, cutoff, &buf)
         );
 
         /* ADS: could do separately: make record a contiguous chunk */
