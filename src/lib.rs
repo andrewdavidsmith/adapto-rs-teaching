@@ -26,7 +26,10 @@
 use std::io::{Write,Read};
 use std::process;
 use std::cmp::{max, min};
+use std::fmt;
+use std::ptr;
 
+use rayon::prelude::*;
 
 // ADS: this works well, but imports way more than is
 // needed. Considering `gzp`
@@ -145,34 +148,24 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32)
 }
 
 
-/// FQBuf is just a buffer that keeps a cursor (position) and how much
-/// of the buffer is filled.
-#[derive(Default)]
-struct FQBuf {
-    buf: Vec<u8>,
-    pos: usize, // current offset into buf, must always be <= `filled`.
-    filled: usize,
+fn shift(buf: &mut [u8], cursor: &mut usize, filled: &mut usize) {
+    let mut j = 0;
+    for i in *cursor..*filled {
+        buf[j] = buf[i];
+        j += 1;
+    }
+    *filled = j;
+    *cursor = 0;
 }
 
 
-impl FQBuf {
-    fn shift(&mut self) {
-        let mut j = 0;
-        for i in self.pos..self.filled {
-            self.buf[j] = self.buf[i];
-            j += 1;
+fn next_line(buf: &mut [u8], filled: usize, offset: usize) -> usize {
+    for i in offset..filled {
+        if buf[i] == b'\n' {
+            return i + 1;
         }
-        self.filled = j;
-        self.pos = 0;
     }
-    fn next_newline(&self, offset: usize) -> usize {
-        for i in offset..self.filled {
-            if self.buf[i] == b'\n' {
-                return i;
-            }
-        }
-        0
-    }
+    usize::MAX
 }
 
 
@@ -188,64 +181,92 @@ struct FQRec {
     r: usize, // start of "read"
     o: usize, // start of "other"
     q: usize, // start of "quality" scores
+    e: usize, // end of the record
     start: usize, // *start* of good part of seq
     stop: usize, // *stop* of good part of seq
 }
 
 
+impl fmt::Display for FQRec {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "@={}, seq={}, +={}, qual={}, end={}, start={}, stop={}",
+               self.n, self.r, self.o, self.q, self.e, self.start, self.stop)
+    }
+}
+
+
 impl FQRec {
-    fn set_start_stop(&mut self,
-                      adaptor: &[u8],
-                      sp: &Vec<usize>, cutoff: u8, buf: &FQBuf) {
-        let x = buf.pos - 1;
-        let (qstart, qstop) = qual_trim(&buf.buf[self.q..x], 0, cutoff as i32);
+    fn process(
+        &mut self,
+        adaptor: &[u8],
+        sp: &Vec<usize>,
+        cutoff: u8,
+        buf: &Vec<u8>,
+    ) {
+        let seqlen = self.stop;
+        let (qstart, qstop) =
+            qual_trim(&buf[self.q..self.q + seqlen], 0, cutoff as i32);
         // consecutive N values at both ends
-        let x = self.o - 1;
-        let (nstart, nstop) = trim_n_ends(&buf.buf[self.r..x]);
-        // do not allow any N or low qual bases to interfere with adaptor
+        let (nstart, nstop) =
+            trim_n_ends(&buf[self.r..self.r + seqlen]);
+        // so no N or low qual bases can interfere with adaptor
         self.stop = min(qstop, nstop);
         // find the adaptor at the 3' end
-        let adaptor_start = kmp(adaptor, &sp, &buf.buf[self.r..x], self.stop);
+        let adaptor_start =
+            kmp(adaptor, &sp, &buf[self.r..self.r + seqlen], self.stop);
         self.stop = min(self.stop, adaptor_start);
-        let x = self.r + self.stop;
-        let (_, nstop) = trim_n_ends(&buf.buf[self.r..x]);
+        let (_, nstop) =
+            trim_n_ends(&buf[self.r..self.r + self.stop]);
         self.stop = min(self.stop, nstop);
         self.start = min(max(qstart, nstart), self.stop);
-    }
-    fn find_record_from_buf(&mut self, buf: &mut FQBuf) -> bool {
-        // ADS: does not fail if a record is broken, but will ignore it
-        self.r = buf.next_newline(buf.pos) + 1;
-        self.o = buf.next_newline(self.r) + 1;
-        self.q = buf.next_newline(self.o) + 1;
-        self.n = buf.next_newline(self.q) + 1; // to swap later!!!
-        if self.r > 1 && self.o > 1 && self.q > 1 && self.n > 1 {
-            (self.n, buf.pos) = (buf.pos, self.n);
-            return true;
+        /* ADS: Removing the comments in the next two lines breaks up
+         * this function, which would allow the work to be done in two
+         * loops, but that would mean waiting for slower threads. */
+    // }
+    // fn compress(&mut self, buf: &Vec<u8>) {
+        let b = buf.as_ptr() as *mut u8;
+        let r_sz = self.stop - self.start;
+        unsafe {
+            ptr::copy(b.add(self.r + self.start), b.add(self.r), r_sz);
+            *b.add(self.r + r_sz) = b'\n';
         }
-        else {
-            return false;
+        let o = self.r + r_sz + 1;
+        let o_sz = self.q - self.o;
+        unsafe {
+            ptr::copy(b.add(self.o), b.add(o), o_sz);
+            // newline should already exist because o_sz includes it
+            assert!(*b.add(o + o_sz - 1) == b'\n');
         }
+        self.o = o;
+        let q = self.o + o_sz;
+        unsafe {
+            ptr::copy(b.add(self.q + self.start), b.add(q), r_sz);
+            *b.add(q + r_sz) = b'\n';
+        }
+        self.q = q;
+        self.e = self.q + r_sz + 1;
+
+        self.start = 0;
+        self.stop = r_sz;
     }
-    fn write<W: Write>(&mut self, buf: &mut FQBuf, writer: &mut W) {
-        buf.buf[self.o + 1] = b'\n';
-        buf.buf[self.r + self.stop] = b'\n';
-        buf.buf[self.q + self.stop] = b'\n';
-        self.stop += 1;
-        /* ADS: below, this will compile with bgzf, but it segfaults */
-        // use std::io::IoSlice;
-        // writer.write_vectored(
-        //     &[IoSlice::new(&buf.buf[self.n..self.r]),
-        //       IoSlice::new(&buf.buf[(self.r + self.start)..
-        //                             (self.r + self.stop)]),
-        //       IoSlice::new(&buf.buf[self.o..(self.o + 2)]),
-        //       IoSlice::new(&buf.buf[(self.q + self.start)..
-        //                             (self.q + self.stop)]),
-        //     ]).unwrap();
-        writer.write(&buf.buf[self.n..self.r]).unwrap();
-        writer.write(&buf.buf[(self.r + self.start)..(self.r + self.stop)]).unwrap();
-        writer.write(&buf.buf[self.o..(self.o + 2)]).unwrap();
-        writer.write(&buf.buf[(self.q + self.start)..(self.q + self.stop)]).unwrap();
+    fn write<W: Write>(&self, buf: &Vec<u8>, writer: &mut W) {
+        writer.write(&buf[self.n..self.e]).unwrap();
     }
+}
+
+
+fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
+    let n = *cursor;
+    let r = next_line(buf, filled, n);
+    let o = next_line(buf, filled, r);
+    let q = next_line(buf, filled, o);
+    let e = next_line(buf, filled, q);
+    if e != usize::MAX {
+        *cursor = e;
+    }
+    // ADS: here is where we would detect a malformed file
+    assert!(buf[n] == b'@');
+    FQRec{n, r, o, q, e, start: 0, stop: o - r - 1}
 }
 
 
@@ -272,7 +293,8 @@ pub fn process_reads(
     });
 
     if n_threads > 1 {
-        // make a thread pool and give it to the input and output files
+        // make a HTSlib thread pool and give it to the input and
+        // output files
         let tpool = match ThreadPool::new(n_threads - 1) {
             Ok(p) => p,
             Err(error) => {
@@ -290,31 +312,52 @@ pub fn process_reads(
         });
     }
 
-    let mut buf: FQBuf = Default::default();
-    buf.buf.resize(buffer_size, b'\0');
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n_threads as usize)
+        .build_global().unwrap();
 
-    let mut fq: FQRec = Default::default();
+    let mut buf: Vec<u8> = vec![b'\0'; buffer_size];
+    let mut filled = 0usize;
+    let mut cursor = 0usize;
 
-    buf.filled += reader.read(&mut buf.buf[buf.filled..]).unwrap();
-
-    let mut found_rec;
-    let mut data_exhausted = false;
+    let mut recs: Vec<FQRec> = Vec::new();
 
     loop {
+
+        // move any unused data to start of buffer
+        shift(&mut buf, &mut cursor, &mut filled);
+
+        // read the input to fill the buffer
+        filled += reader.read(&mut buf[filled..]).unwrap();
+
+        // find the sequenced read records
+        recs.clear(); // keep capacity
         loop {
-            found_rec = fq.find_record_from_buf(&mut buf);
-            if found_rec || data_exhausted {
+            let fq = get_next_record(&mut buf, &mut cursor, filled);
+            if fq.e == usize::MAX {
                 break;
             }
-            buf.shift(); // reload the buffer; not circular...
-            buf.filled += reader.read(&mut buf.buf[buf.filled..]).unwrap();
-            data_exhausted = buf.filled < buf.buf.len();
+            recs.push(fq);
         }
-        if !found_rec && data_exhausted {
+
+        // find end-points of trimmed reads
+        recs.par_iter_mut().for_each(
+            |x| x.process(&adaptor, &sp, cutoff, &buf)
+        );
+
+        /* ADS: could do separately: make record a contiguous chunk */
+        // recs.iter_mut().for_each(|x| x.compress(&buf));
+
+        // write all records to output file
+        recs.iter_mut().for_each(
+            |x|
+            x.write(&mut buf, &mut writer)
+        );
+
+        // exit if previous read hit end of file
+        if filled < buf.len() {
             break;
         }
-        fq.set_start_stop(&adaptor, &sp, cutoff, &buf);
-        fq.write(&mut buf, &mut writer);
     }
     writer.flush().unwrap();
 

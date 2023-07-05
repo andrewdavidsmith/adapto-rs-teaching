@@ -34,7 +34,7 @@
 
 use clap::Parser;
 use std::process::ExitCode;
-
+extern crate num_cpus;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -98,16 +98,33 @@ fn main() -> ExitCode {
 
     let adaptor = args.adaptor.unwrap().into_bytes();
 
+    if args.verbose {
+        eprintln!("input file: {}", args.fastq);
+        eprintln!("output file: {}", args.out);
+        eprintln!("quality score cutoff: {}", args.qual_cutoff);
+        use std::str::from_utf8;
+        eprintln!("adaptor sequence: {}", from_utf8(&adaptor).unwrap());
+        eprintln!("compress output: {}", if args.zip {"yes"} else {"yes"});
+        eprintln!("threads requested: {}", args.threads);
+        eprintln!("detected cpu cores: {}", num_cpus::get());
+        eprintln!("buffer size: {}", args.buffer_size);
+        match (&args.pfastq, &args.pout) {
+            (Some(x), Some(y)) => {
+                eprintln!("input file2: {}", x);
+                eprintln!("output file2: {}", y);
+            },
+            (Some(_), None) | (None, Some(_)) => {
+                eprintln!("paired end requires two input and output files");
+                return ExitCode::FAILURE;
+            },
+            (None, None) => {}
+        }
+    }
+
     use radapt::process_reads;
-    if let Some(pfastq) = args.pfastq {
-        if let Some(pout) = args.pout {
-            process_reads(args.zip, args.threads, args.buffer_size, &adaptor,
-                          &pfastq, &pout, args.qual_cutoff).unwrap();
-        }
-        else {
-            eprintln!("specifying two inputs requires two outputs");
-            return ExitCode::FAILURE;
-        }
+    if let (Some(pfastq), Some(pout)) = (args.pfastq, args.pout) {
+        process_reads(args.zip, args.threads, args.buffer_size, &adaptor,
+                      &pfastq, &pout, args.qual_cutoff).unwrap();
     }
     process_reads(args.zip, args.threads, args.buffer_size, &adaptor,
                   &args.fastq, &args.out, args.qual_cutoff).unwrap();
