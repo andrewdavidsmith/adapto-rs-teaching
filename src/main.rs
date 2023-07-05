@@ -64,6 +64,10 @@ struct Args {
     #[arg(short, long, default_value = "AGATCGGAAGAGC")]
     adaptor: Option<String>,
 
+    /// Adaptor sequence
+    #[arg(short, long)]
+    keep_header: bool,
+
     /// Zip the output (does nothing...)
     #[arg(short, long)]
     zip: bool,
@@ -104,6 +108,7 @@ fn main() -> ExitCode {
         eprintln!("quality score cutoff: {}", args.qual_cutoff);
         use std::str::from_utf8;
         eprintln!("adaptor sequence: {}", from_utf8(&adaptor).unwrap());
+        eprintln!("keep header: {}", if args.keep_header {"no"} else {"no"});
         eprintln!("compress output: {}", if args.zip {"yes"} else {"yes"});
         eprintln!("threads requested: {}", args.threads);
         eprintln!("detected cpu cores: {}", num_cpus::get());
