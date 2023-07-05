@@ -121,7 +121,7 @@ fn main() -> ExitCode {
         }
     }
 
-    use radapt::process_reads;
+    use adaptrs::process_reads;
     if let (Some(pfastq), Some(pout)) = (args.pfastq, args.pout) {
         process_reads(args.zip, args.threads, args.buffer_size, &adaptor,
                       &pfastq, &pout, args.qual_cutoff).unwrap();
