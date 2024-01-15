@@ -1,6 +1,6 @@
 /* MIT License
  *
- * Copyright (c) 2023 Andrew Smith
+ * Copyright (c) 2023-2024 Andrew Smith
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation

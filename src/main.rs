@@ -1,6 +1,6 @@
 /* MIT License
  *
- * Copyright (c) 2023 Andrew Smith
+ * Copyright (c) 2023-2024 Andrew Smith
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
         }
     }
 
-    use adaptrs::process_reads;
+    use adapto_rs::process_reads;
     if let (Some(pfastq), Some(pout)) = (args.pfastq, args.pout) {
         process_reads(args.zip, args.threads, args.buffer_size, &adaptor,
                       &pfastq, &pout, args.qual_cutoff).unwrap();
