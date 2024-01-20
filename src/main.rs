@@ -23,15 +23,12 @@
  * SOFTWARE.
  */
 
-
 /// Program to cut adaptors from sequenced reads. Accepts one adaptor
 /// and will apply it to both ends in paired-end data. Removes Ns at
 /// the end of reads. Removes low quality bases at ends of reads.
 /// Output is compressed as bgzf. Input may be compressed as gz/bgzf
 /// or not. Extra threads help with compressing output and
 /// decompressing input.
-
-
 use clap::Parser;
 use std::process::ExitCode;
 extern crate num_cpus;
@@ -40,11 +37,11 @@ extern crate num_cpus;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Fastq input file
-    #[structopt(required=true)]
+    #[structopt(required = true)]
     fastq: String,
 
     /// Paired-end input second fastq file
-    #[structopt(required=false)]
+    #[structopt(required = false)]
     pfastq: Option<String>,
 
     /// Output file
@@ -52,7 +49,7 @@ struct Args {
     out: String,
 
     /// Second output file for paired-end reads
-    #[structopt(required=false)]
+    #[structopt(required = false)]
     #[arg(short, long)]
     pout: Option<String>,
 
@@ -64,11 +61,11 @@ struct Args {
     #[arg(short, long, default_value = "AGATCGGAAGAGC")]
     adaptor: Option<String>,
 
-    /// Adaptor sequence
+    /// Keep all read prefixes
     #[arg(short, long)]
-    keep_header: bool,
+    keep_prefix: bool,
 
-    /// Zip the output (does nothing...)
+    /// Zip the output using BGZF format (not used)
     #[arg(short, long)]
     zip: bool,
 
@@ -85,9 +82,7 @@ struct Args {
     verbose: bool,
 }
 
-
 fn main() -> ExitCode {
-
     let args = Args::parse();
 
     if args.threads <= 0 {
@@ -108,8 +103,11 @@ fn main() -> ExitCode {
         eprintln!("quality score cutoff: {}", args.qual_cutoff);
         use std::str::from_utf8;
         eprintln!("adaptor sequence: {}", from_utf8(&adaptor).unwrap());
-        eprintln!("keep header: {}", if args.keep_header {"no"} else {"no"});
-        eprintln!("compress output: {}", if args.zip {"yes"} else {"yes"});
+        eprintln!(
+            "keep prefix: {}",
+            if args.keep_prefix { "no" } else { "no" }
+        );
+        eprintln!("compress output: {}", if args.zip { "yes" } else { "no" });
         eprintln!("threads requested: {}", args.threads);
         eprintln!("detected cpu cores: {}", num_cpus::get());
         eprintln!("buffer size: {}", args.buffer_size);
@@ -117,22 +115,44 @@ fn main() -> ExitCode {
             (Some(x), Some(y)) => {
                 eprintln!("input file2: {}", x);
                 eprintln!("output file2: {}", y);
-            },
+            }
             (Some(_), None) | (None, Some(_)) => {
                 eprintln!("paired end requires two input and output files");
                 return ExitCode::FAILURE;
-            },
+            }
             (None, None) => {}
         }
     }
 
     use adapto_rs::process_reads;
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads as usize)
+        .build_global()
+        .unwrap();
+
     if let (Some(pfastq), Some(pout)) = (args.pfastq, args.pout) {
-        process_reads(args.zip, args.threads, args.buffer_size, &adaptor,
-                      &pfastq, &pout, args.qual_cutoff).unwrap();
+        process_reads(
+            args.zip,
+            args.threads,
+            args.buffer_size,
+            &adaptor,
+            &pfastq,
+            &pout,
+            args.qual_cutoff,
+        )
+        .unwrap();
     }
-    process_reads(args.zip, args.threads, args.buffer_size, &adaptor,
-                  &args.fastq, &args.out, args.qual_cutoff).unwrap();
+    process_reads(
+        args.zip,
+        args.threads,
+        args.buffer_size,
+        &adaptor,
+        &args.fastq,
+        &args.out,
+        args.qual_cutoff,
+    )
+    .unwrap();
 
     ExitCode::SUCCESS
 }
