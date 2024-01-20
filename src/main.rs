@@ -31,7 +31,8 @@
 /// decompressing input.
 use clap::Parser;
 use std::process::ExitCode;
-extern crate num_cpus;
+use num_cpus;
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -61,12 +62,12 @@ struct Args {
     #[arg(short, long, default_value = "AGATCGGAAGAGC")]
     adaptor: Option<String>,
 
-    /// Keep all read prefixes
-    #[arg(short, long)]
+    /// Keep all read prefixes (not implemented)
+    #[arg(short, long, default_value_t = true)]
     keep_prefix: bool,
 
-    /// Zip the output using BGZF format (not used)
-    #[arg(short, long)]
+    /// Zip output files as BGZF format (not implemented)
+    #[arg(short, long, default_value_t = true)]
     zip: bool,
 
     /// Threads to use
@@ -82,6 +83,22 @@ struct Args {
     verbose: bool,
 }
 
+
+fn is_readable(filename: &String) -> bool {
+    use std::fs::File;
+    let mut f = match File::open(&filename) {
+        Ok(file) => file,
+        _ => return false,
+    };
+    let mut byte = [0_u8];
+    use std::io::Read;
+    match f.read_exact(&mut byte) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+
 fn main() -> ExitCode {
     let args = Args::parse();
 
@@ -96,6 +113,11 @@ fn main() -> ExitCode {
     }
 
     let adaptor = args.adaptor.unwrap().into_bytes();
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads as usize)
+        .build_global()
+        .unwrap();
 
     if args.verbose {
         eprintln!("input file: {}", args.fastq);
@@ -124,15 +146,26 @@ fn main() -> ExitCode {
         }
     }
 
+    if !is_readable(&args.fastq) {
+        eprintln!("input file not readable: {}", args.fastq);
+        return ExitCode::FAILURE;
+    }
+
+    if Path::new(&args.out).exists() {
+        eprintln!("output file already exists: {}", args.out);
+    }
+
     use adapto_rs::process_reads;
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.threads as usize)
-        .build_global()
-        .unwrap();
-
     if let (Some(pfastq), Some(pout)) = (args.pfastq, args.pout) {
-        process_reads(
+        if !is_readable(&pfastq) {
+            eprintln!("input file not readable: {}", pfastq);
+            return ExitCode::FAILURE;
+        }
+        if args.verbose && Path::new(&pout).exists() {
+            eprintln!("output file already exists: {}", pout);
+        }
+        match process_reads(
             args.zip,
             args.threads,
             args.buffer_size,
@@ -140,10 +173,13 @@ fn main() -> ExitCode {
             &pfastq,
             &pout,
             args.qual_cutoff,
-        )
-        .unwrap();
+        ) {
+            Err(e) => eprintln!("error processing end two: {}", e),
+            _ => (),
+        };
     }
-    process_reads(
+
+    match process_reads(
         args.zip,
         args.threads,
         args.buffer_size,
@@ -151,8 +187,11 @@ fn main() -> ExitCode {
         &args.fastq,
         &args.out,
         args.qual_cutoff,
-    )
-    .unwrap();
-
-    ExitCode::SUCCESS
+    ) {
+        Err(err) => {
+            eprintln!("error processing end one: {}", err);
+            ExitCode::FAILURE
+        }
+        Ok(_) => ExitCode::SUCCESS
+    }
 }
