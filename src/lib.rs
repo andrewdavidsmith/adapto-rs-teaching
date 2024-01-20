@@ -23,11 +23,11 @@
  * SOFTWARE.
  */
 
-use std::io::{Write,Read};
 use std::cmp::{max, min};
-use std::fmt;
-use std::ptr;
 use std::error::Error;
+use std::fmt;
+use std::io::{Read, Write};
+use std::ptr;
 
 use rayon::prelude::*;
 
@@ -35,7 +35,7 @@ use rayon::prelude::*;
 // needed. Considering `gzp`
 use rust_htslib::bgzf;
 use rust_htslib::tpool::ThreadPool;
-
+// use rust_htslib::bgzf::CompressionLevel;
 
 /// The prefix function for the KMP algorithm
 fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
@@ -53,7 +53,6 @@ fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
     }
     sp
 }
-
 
 /// The KMP algorithm that returns the first full match or the start
 /// of any suffix match to the pattern (i.e. adaptor).
@@ -74,7 +73,7 @@ fn kmp(adaptor: &[u8], sp: &[usize], read: &[u8], m: usize) -> usize {
         // if we have already successfully compared all positions in
         // P, then we have found a match
         if j == n {
-            return i - n + 1;
+            return (i + 1) - n;
         }
         i += 1;
     }
@@ -82,7 +81,6 @@ fn kmp(adaptor: &[u8], sp: &[usize], read: &[u8], m: usize) -> usize {
     // prefix match of the pattern
     i - j
 }
-
 
 /// Find the positions in the read of the first non-N and last non-N.
 fn trim_n_ends(read: &[u8]) -> (usize, usize) {
@@ -97,12 +95,9 @@ fn trim_n_ends(read: &[u8]) -> (usize, usize) {
     (start, stop)
 }
 
-
 /// Find the positions in the read where quality scores indicate the
 /// read should be trimmed. This is copied from cutadapt source.
-fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32)
-             -> (usize, usize) {
-
+fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32) -> (usize, usize) {
     const QUAL_BASE: i32 = 33; // assumes base quality starts at 33
 
     /* ADS: COPIED FROM cutadapt SOURCE */
@@ -147,7 +142,6 @@ fn qual_trim(qual: &[u8], cut_front: i32, cut_back: i32)
     (start as usize, stop as usize)
 }
 
-
 fn shift(buf: &mut [u8], cursor: &mut usize, filled: &mut usize) {
     let mut j = 0;
     for i in *cursor..*filled {
@@ -158,7 +152,6 @@ fn shift(buf: &mut [u8], cursor: &mut usize, filled: &mut usize) {
     *cursor = 0;
 }
 
-
 fn next_line(buf: &mut [u8], filled: usize, offset: usize) -> usize {
     for i in offset..filled {
         if buf[i] == b'\n' {
@@ -168,7 +161,6 @@ fn next_line(buf: &mut [u8], filled: usize, offset: usize) -> usize {
     usize::MAX
 }
 
-
 /// FQRec is a FASTQ record that represents the position of the start
 /// of the name (n), the start of the read sequence (r), the start of
 /// the other name, the one with the "+" (o), and the start of the
@@ -177,23 +169,24 @@ fn next_line(buf: &mut [u8], filled: usize, offset: usize) -> usize {
 /// strings.
 #[derive(Default)]
 struct FQRec {
-    n: usize, // start of "name"
-    r: usize, // start of "read"
-    o: usize, // start of "other"
-    q: usize, // start of "quality" scores
-    e: usize, // end of the record
+    n: usize,     // start of "name"
+    r: usize,     // start of "read"
+    o: usize,     // start of "other"
+    q: usize,     // start of "quality" scores
+    e: usize,     // end of the record
     start: usize, // *start* of good part of seq
-    stop: usize, // *stop* of good part of seq
+    stop: usize,  // *stop* of good part of seq
 }
-
 
 impl fmt::Display for FQRec {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "@={}, seq={}, +={}, qual={}, end={}, start={}, stop={}",
-               self.n, self.r, self.o, self.q, self.e, self.start, self.stop)
+        write!(
+            f,
+            "@={}, seq={}, +={}, qual={}, end={}, start={}, stop={}",
+            self.n, self.r, self.o, self.q, self.e, self.start, self.stop
+        )
     }
 }
-
 
 impl FQRec {
     fn process(
@@ -207,23 +200,21 @@ impl FQRec {
         let (qstart, qstop) =
             qual_trim(&buf[self.q..self.q + seqlen], 0, cutoff as i32);
         // consecutive N values at both ends
-        let (nstart, nstop) =
-            trim_n_ends(&buf[self.r..self.r + seqlen]);
+        let (nstart, nstop) = trim_n_ends(&buf[self.r..self.r + seqlen]);
         // so no N or low qual bases can interfere with adaptor
         self.stop = min(qstop, nstop);
         // find the adaptor at the 3' end
         let adaptor_start =
             kmp(adaptor, &sp, &buf[self.r..self.r + seqlen], self.stop);
         self.stop = min(self.stop, adaptor_start);
-        let (_, nstop) =
-            trim_n_ends(&buf[self.r..self.r + self.stop]);
+        let (_, nstop) = trim_n_ends(&buf[self.r..self.r + self.stop]);
         self.stop = min(self.stop, nstop);
         self.start = min(max(qstart, nstart), self.stop);
         /* ADS: Removing the comments in the next two lines breaks up
          * this function, which would allow the work to be done in two
          * loops, but that would mean waiting for slower threads. */
-    // }
-    // fn compress(&mut self, buf: &Vec<u8>) {
+        // }
+        // fn compress(&mut self, buf: &Vec<u8>) {
         let b = buf.as_ptr() as *mut u8;
         let r_sz = self.stop - self.start;
         unsafe {
@@ -257,7 +248,6 @@ impl FQRec {
     }
 }
 
-
 fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
     // ADS: here is where we should detect malformed records
     let n = *cursor;
@@ -269,9 +259,16 @@ fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
         *cursor = e;
         assert!(buf[n] == b'@');
     }
-    FQRec{n, r, o, q, e, start: 0, stop: o - r - 1}
+    FQRec {
+        n,
+        r,
+        o,
+        q,
+        e,
+        start: 0,
+        stop: if r < o { o - r - 1 } else { 0 },
+    }
 }
-
 
 pub fn process_reads(
     _zip: bool,
@@ -280,16 +277,24 @@ pub fn process_reads(
     adaptor: &[u8],
     input: &String,
     output: &String,
-    cutoff: u8
+    cutoff: u8,
 ) -> Result<(), Box<dyn Error>> {
-
     let sp = kmp_prefix_function(adaptor);
+
+    // let comp_lvl = if zip {
+    //     CompressionLevel::Default
+    // } else {
+    //     CompressionLevel::NoCompression
+    // };
 
     // open the bgzf files for reading and writing
     let mut reader = match bgzf::Reader::from_path(input) {
         Ok(file) => file,
         Err(e) => return Err(Box::new(e)),
     };
+
+    // ADS: using from_path_with_level seems broken
+    // match bgzf::Writer::from_path_with_level(output, comp_lvl) {
     let mut writer = match bgzf::Writer::from_path(output) {
         Ok(file) => file,
         Err(e) => return Err(Box::new(e)),
@@ -303,10 +308,6 @@ pub fn process_reads(
         writer.set_thread_pool(&tpool)?;
     }
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(n_threads as usize)
-        .build_global().unwrap();
-
     let mut buf: Vec<u8> = vec![b'\0'; buffer_size];
     let mut filled = 0usize;
     let mut cursor = 0usize;
@@ -314,7 +315,6 @@ pub fn process_reads(
     let mut recs: Vec<FQRec> = Vec::new();
 
     loop {
-
         // move any unused data to start of buffer
         shift(&mut buf, &mut cursor, &mut filled);
 
@@ -332,19 +332,14 @@ pub fn process_reads(
         }
 
         // find end-points of trimmed reads
-        recs.par_iter_mut().for_each(
-            |x|
-            x.process(&adaptor, &sp, cutoff, &buf)
-        );
+        recs.par_iter_mut()
+            .for_each(|x| x.process(&adaptor, &sp, cutoff, &buf));
 
         /* ADS: could do separately: make record a contiguous chunk */
         // recs.iter_mut().for_each(|x| x.compress(&buf));
 
         // write all records to output file
-        recs.iter_mut().for_each(
-            |x|
-            x.write(&mut buf, &mut writer)
-        );
+        recs.iter_mut().for_each(|x| x.write(&mut buf, &mut writer));
 
         // exit if previous read hit end of file
         if filled < buf.len() {
