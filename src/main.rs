@@ -33,6 +33,8 @@ use clap::Parser;
 use std::process::ExitCode;
 use num_cpus;
 use std::path::Path;
+use file_format::FileFormat;
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -119,6 +121,8 @@ fn main() -> ExitCode {
         .build_global()
         .unwrap();
 
+    let _format = FileFormat::from_file(&args.fastq);
+
     if args.verbose {
         eprintln!("input file: {}", args.fastq);
         eprintln!("output file: {}", args.out);
@@ -167,7 +171,6 @@ fn main() -> ExitCode {
         }
         match process_reads(
             args.zip,
-            args.threads,
             args.buffer_size,
             &adaptor,
             &pfastq,
@@ -181,7 +184,6 @@ fn main() -> ExitCode {
 
     match process_reads(
         args.zip,
-        args.threads,
         args.buffer_size,
         &adaptor,
         &args.fastq,
