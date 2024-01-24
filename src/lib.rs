@@ -28,14 +28,11 @@ use std::error::Error;
 use std::fmt;
 use std::io::{Read, Write};
 use std::ptr;
-
+use std::fs::File;
 use rayon::prelude::*;
-
-// ADS: this works well, but imports way more than is
-// needed. Considering `gzp`
-use rust_htslib::bgzf;
-use rust_htslib::tpool::ThreadPool;
-// use rust_htslib::bgzf::CompressionLevel;
+use bgzip::{read::BGZFMultiThreadReader, write::BGZFMultiThreadWriter};
+use bgzip::Compression;
+use file_format::FileFormat;
 
 /// The prefix function for the KMP algorithm
 fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
@@ -272,41 +269,45 @@ fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
 
 pub fn process_reads(
     _zip: bool,
-    n_threads: u32,
     buffer_size: usize,
     adaptor: &[u8],
     input: &String,
     output: &String,
     cutoff: u8,
 ) -> Result<(), Box<dyn Error>> {
+
     let sp = kmp_prefix_function(adaptor);
 
-    // let comp_lvl = if zip {
-    //     CompressionLevel::Default
-    // } else {
-    //     CompressionLevel::NoCompression
+    let level = Compression::default();
+
+    let _input_format = match FileFormat::from_file(&input) {
+        Ok(format) => format,
+        Err(e) => return Err(Box::new(e)),
+    };
+
+    // let mut reader = match File::open(&input) {
+    //     Ok(file) => match input_format {
+    //         FileFormat::Gzip => match BGZFMultiThreadReader::new(file) {
+    //             Ok(reader) => reader,
+    //             Err(e) => return Err(Box::new(e)),
+    //         },
+    //         _ => BufReader::new(file),
+    //     },
+    //     Err(e) => return Err(Box::new(e)),
     // };
 
-    // open the bgzf files for reading and writing
-    let mut reader = match bgzf::Reader::from_path(input) {
-        Ok(file) => file,
+    let mut reader = match File::open(&input) {
+        Ok(file) => match BGZFMultiThreadReader::new(file) {
+            Ok(reader) => reader,
+            Err(e) => return Err(Box::new(e)),
+        },
         Err(e) => return Err(Box::new(e)),
     };
 
-    // ADS: using from_path_with_level seems broken
-    // match bgzf::Writer::from_path_with_level(output, comp_lvl) {
-    let mut writer = match bgzf::Writer::from_path(output) {
-        Ok(file) => file,
+    let mut writer = match File::create(&output) {
+        Ok(file) => BGZFMultiThreadWriter::new(file, level),
         Err(e) => return Err(Box::new(e)),
     };
-
-    // If extra threads are available, make a HTSlib pool and use them
-    // for compression/decompression
-    if n_threads > 1 {
-        let tpool = ThreadPool::new(n_threads - 1)?;
-        reader.set_thread_pool(&tpool)?;
-        writer.set_thread_pool(&tpool)?;
-    }
 
     let mut buf: Vec<u8> = vec![b'\0'; buffer_size];
     let mut filled = 0usize;
