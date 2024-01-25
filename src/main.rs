@@ -30,11 +30,9 @@
 /// or not. Extra threads help with compressing output and
 /// decompressing input.
 use clap::Parser;
-use std::process::ExitCode;
 use num_cpus;
 use std::path::Path;
-use file_format::FileFormat;
-
+use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -69,7 +67,7 @@ struct Args {
     keep_prefix: bool,
 
     /// Zip output files as BGZF format (not implemented)
-    #[arg(short, long, default_value_t = true)]
+    #[arg(short, long)]
     zip: bool,
 
     /// Threads to use
@@ -85,7 +83,6 @@ struct Args {
     verbose: bool,
 }
 
-
 fn is_readable(filename: &String) -> bool {
     use std::fs::File;
     let mut f = match File::open(&filename) {
@@ -99,7 +96,6 @@ fn is_readable(filename: &String) -> bool {
         Err(_) => false,
     }
 }
-
 
 fn main() -> ExitCode {
     let args = Args::parse();
@@ -120,8 +116,6 @@ fn main() -> ExitCode {
         .num_threads(args.threads as usize)
         .build_global()
         .unwrap();
-
-    let _format = FileFormat::from_file(&args.fastq);
 
     if args.verbose {
         eprintln!("input file: {}", args.fastq);
@@ -159,7 +153,7 @@ fn main() -> ExitCode {
         eprintln!("output file already exists: {}", args.out);
     }
 
-    use adapto_rs::process_reads;
+    use adapto_rs::remove_adaptors;
 
     if let (Some(pfastq), Some(pout)) = (args.pfastq, args.pout) {
         if !is_readable(&pfastq) {
@@ -169,7 +163,7 @@ fn main() -> ExitCode {
         if args.verbose && Path::new(&pout).exists() {
             eprintln!("output file already exists: {}", pout);
         }
-        match process_reads(
+        match remove_adaptors(
             args.zip,
             args.buffer_size,
             &adaptor,
@@ -177,12 +171,15 @@ fn main() -> ExitCode {
             &pout,
             args.qual_cutoff,
         ) {
-            Err(e) => eprintln!("error processing end two: {}", e),
-            _ => (),
+            Err(e) => {
+                eprintln!("error processing end two: {}", e);
+                return ExitCode::FAILURE;
+            },
+            Ok(_) => (),
         };
     }
 
-    match process_reads(
+    match remove_adaptors(
         args.zip,
         args.buffer_size,
         &adaptor,
@@ -190,10 +187,10 @@ fn main() -> ExitCode {
         &args.out,
         args.qual_cutoff,
     ) {
-        Err(err) => {
-            eprintln!("error processing end one: {}", err);
+        Err(e) => {
+            eprintln!("error processing end one: {}", e);
             ExitCode::FAILURE
-        }
+        },
         Ok(_) => ExitCode::SUCCESS
     }
 }
