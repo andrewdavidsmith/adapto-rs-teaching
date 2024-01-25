@@ -23,16 +23,17 @@
  * SOFTWARE.
  */
 
+use bgzip::Compression;
+use bgzip::{read::BGZFMultiThreadReader, write::BGZFMultiThreadWriter};
+use file_format::FileFormat;
+use rayon::prelude::*;
 use std::cmp::{max, min};
 use std::error::Error;
 use std::fmt;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
 use std::io::{Read, Write};
 use std::ptr;
-use std::fs::File;
-use rayon::prelude::*;
-use bgzip::{read::BGZFMultiThreadReader, write::BGZFMultiThreadWriter};
-use bgzip::Compression;
-use file_format::FileFormat;
 
 /// The prefix function for the KMP algorithm
 fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
@@ -267,47 +268,14 @@ fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
     }
 }
 
-pub fn process_reads(
-    _zip: bool,
+fn process_reads<R: Read, W: Write>(
     buffer_size: usize,
     adaptor: &[u8],
-    input: &String,
-    output: &String,
+    reader: &mut R,
+    mut writer: &mut W,
     cutoff: u8,
 ) -> Result<(), Box<dyn Error>> {
-
     let sp = kmp_prefix_function(adaptor);
-
-    let level = Compression::default();
-
-    let _input_format = match FileFormat::from_file(&input) {
-        Ok(format) => format,
-        Err(e) => return Err(Box::new(e)),
-    };
-
-    // let mut reader = match File::open(&input) {
-    //     Ok(file) => match input_format {
-    //         FileFormat::Gzip => match BGZFMultiThreadReader::new(file) {
-    //             Ok(reader) => reader,
-    //             Err(e) => return Err(Box::new(e)),
-    //         },
-    //         _ => BufReader::new(file),
-    //     },
-    //     Err(e) => return Err(Box::new(e)),
-    // };
-
-    let mut reader = match File::open(&input) {
-        Ok(file) => match BGZFMultiThreadReader::new(file) {
-            Ok(reader) => reader,
-            Err(e) => return Err(Box::new(e)),
-        },
-        Err(e) => return Err(Box::new(e)),
-    };
-
-    let mut writer = match File::create(&output) {
-        Ok(file) => BGZFMultiThreadWriter::new(file, level),
-        Err(e) => return Err(Box::new(e)),
-    };
 
     let mut buf: Vec<u8> = vec![b'\0'; buffer_size];
     let mut filled = 0usize;
@@ -350,4 +318,42 @@ pub fn process_reads(
     writer.flush().unwrap();
 
     Ok(())
+}
+
+pub fn remove_adaptors(
+    zip: bool,
+    buf_sz: usize,
+    adaptor: &[u8],
+    input: &String,
+    output: &String,
+    cutoff: u8,
+) -> Result<(), Box<dyn Error>> {
+    let lvl = Compression::default();
+
+    let input_format = match FileFormat::from_file(&input) {
+        Ok(format) => format,
+        Err(e) => return Err(Box::new(e)),
+    };
+
+    let reader_file = File::open(&input)?;
+    let writer_file = File::create(&output)?;
+    if input_format == FileFormat::Gzip {
+        let mut reader = BGZFMultiThreadReader::new(reader_file)?;
+        if zip {
+            let mut writer = BGZFMultiThreadWriter::new(writer_file, lvl);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        } else {
+            let mut writer = BufWriter::new(writer_file);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        }
+    } else {
+        let mut reader = BufReader::new(reader_file);
+        if zip {
+            let mut writer = BGZFMultiThreadWriter::new(writer_file, lvl);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        } else {
+            let mut writer = BufWriter::new(writer_file);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        }
+    }
 }
