@@ -23,19 +23,17 @@
  * SOFTWARE.
  */
 
+use bgzip::Compression;
+use bgzip::{read::BGZFMultiThreadReader, write::BGZFMultiThreadWriter};
+use file_format::FileFormat;
+use rayon::prelude::*;
 use std::cmp::{max, min};
 use std::error::Error;
 use std::fmt;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
 use std::io::{Read, Write};
 use std::ptr;
-
-use rayon::prelude::*;
-
-// ADS: this works well, but imports way more than is
-// needed. Considering `gzp`
-use rust_htslib::bgzf;
-use rust_htslib::tpool::ThreadPool;
-// use rust_htslib::bgzf::CompressionLevel;
 
 /// The prefix function for the KMP algorithm
 fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
@@ -270,43 +268,14 @@ fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
     }
 }
 
-pub fn process_reads(
-    _zip: bool,
-    n_threads: u32,
+fn process_reads<R: Read, W: Write>(
     buffer_size: usize,
     adaptor: &[u8],
-    input: &String,
-    output: &String,
+    reader: &mut R,
+    mut writer: &mut W,
     cutoff: u8,
 ) -> Result<(), Box<dyn Error>> {
     let sp = kmp_prefix_function(adaptor);
-
-    // let comp_lvl = if zip {
-    //     CompressionLevel::Default
-    // } else {
-    //     CompressionLevel::NoCompression
-    // };
-
-    // open the bgzf files for reading and writing
-    let mut reader = match bgzf::Reader::from_path(input) {
-        Ok(file) => file,
-        Err(e) => return Err(Box::new(e)),
-    };
-
-    // ADS: using from_path_with_level seems broken
-    // match bgzf::Writer::from_path_with_level(output, comp_lvl) {
-    let mut writer = match bgzf::Writer::from_path(output) {
-        Ok(file) => file,
-        Err(e) => return Err(Box::new(e)),
-    };
-
-    // If extra threads are available, make a HTSlib pool and use them
-    // for compression/decompression
-    if n_threads > 1 {
-        let tpool = ThreadPool::new(n_threads - 1)?;
-        reader.set_thread_pool(&tpool)?;
-        writer.set_thread_pool(&tpool)?;
-    }
 
     let mut buf: Vec<u8> = vec![b'\0'; buffer_size];
     let mut filled = 0usize;
@@ -349,4 +318,42 @@ pub fn process_reads(
     writer.flush().unwrap();
 
     Ok(())
+}
+
+pub fn remove_adaptors(
+    zip: bool,
+    buf_sz: usize,
+    adaptor: &[u8],
+    input: &String,
+    output: &String,
+    cutoff: u8,
+) -> Result<(), Box<dyn Error>> {
+    let lvl = Compression::default();
+
+    let input_format = match FileFormat::from_file(&input) {
+        Ok(format) => format,
+        Err(e) => return Err(Box::new(e)),
+    };
+
+    let reader_file = File::open(&input)?;
+    let writer_file = File::create(&output)?;
+    if input_format == FileFormat::Gzip {
+        let mut reader = BGZFMultiThreadReader::new(reader_file)?;
+        if zip {
+            let mut writer = BGZFMultiThreadWriter::new(writer_file, lvl);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        } else {
+            let mut writer = BufWriter::new(writer_file);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        }
+    } else {
+        let mut reader = BufReader::new(reader_file);
+        if zip {
+            let mut writer = BGZFMultiThreadWriter::new(writer_file, lvl);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        } else {
+            let mut writer = BufWriter::new(writer_file);
+            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+        }
+    }
 }
