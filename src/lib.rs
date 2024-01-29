@@ -23,17 +23,16 @@
  * SOFTWARE.
  */
 
-use bgzip::Compression;
-use bgzip::{read::BGZFMultiThreadReader, write::BGZFMultiThreadWriter};
-use file_format::FileFormat;
 use rayon::prelude::*;
 use std::cmp::{max, min};
-use std::error::Error;
-use std::fmt;
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
 use std::io::{Read, Write};
 use std::ptr;
+use std::error::Error;
+
+// the rust_htslib crate is not ideal for our purpose
+use rust_htslib::bgzf;
+use rust_htslib::bgzf::CompressionLevel as CompLvl;
+use rust_htslib::tpool::ThreadPool;
 
 /// The prefix function for the KMP algorithm
 fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
@@ -172,12 +171,12 @@ struct FQRec {
     o: usize,     // start of "other"
     q: usize,     // start of "quality" scores
     e: usize,     // end of the record
-    start: usize, // *start* of good part of seq
-    stop: usize,  // *stop* of good part of seq
+    start: usize, // where good part of seq starts
+    stop: usize,  // where good part of seq stops
 }
 
-impl fmt::Display for FQRec {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Display for FQRec {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
             "@={}, seq={}, +={}, qual={}, end={}, start={}, stop={}",
@@ -208,11 +207,14 @@ impl FQRec {
         let (_, nstop) = trim_n_ends(&buf[self.r..self.r + self.stop]);
         self.stop = min(self.stop, nstop);
         self.start = min(max(qstart, nstart), self.stop);
+
         /* ADS: Removing the comments in the next two lines breaks up
          * this function, which would allow the work to be done in two
          * loops, but that would mean waiting for slower threads. */
+
         // }
         // fn compress(&mut self, buf: &Vec<u8>) {
+
         let b = buf.as_ptr() as *mut u8;
         let r_sz = self.stop - self.start;
         unsafe {
@@ -225,6 +227,10 @@ impl FQRec {
             // removing the "header" after the "+"
             *b.add(o) = b'+';
             *b.add(o + 1) = b'\n';
+            /* ADS: the code above simulates the code below, since the
+             * second header line in a record is kept empty in our
+             * output anyway.
+             */
             // ptr::copy(b.add(self.o), b.add(o), o_sz);
             // assert!(*b.add(o + o_sz - 1) == b'\n');
             // *b.add(o + o_sz - 1) == b'\n');
@@ -288,7 +294,7 @@ fn process_reads<R: Read, W: Write>(
         shift(&mut buf, &mut cursor, &mut filled);
 
         // read the input to fill the buffer
-        filled += reader.read(&mut buf[filled..]).unwrap();
+        filled += reader.read(&mut buf[filled..])?;
 
         // find the sequenced read records
         recs.clear(); // keep capacity
@@ -315,45 +321,30 @@ fn process_reads<R: Read, W: Write>(
             break;
         }
     }
-    writer.flush().unwrap();
 
     Ok(())
 }
 
 pub fn remove_adaptors(
     zip: bool,
+    n_threads: u32,
     buf_sz: usize,
     adaptor: &[u8],
     input: &String,
     output: &String,
     cutoff: u8,
 ) -> Result<(), Box<dyn Error>> {
-    let lvl = Compression::default();
-
-    let input_format = match FileFormat::from_file(&input) {
-        Ok(format) => format,
-        Err(e) => return Err(Box::new(e)),
+    let lvl = match zip {
+        true => CompLvl::Default,
+        false => CompLvl::NoCompression,
     };
+    let mut reader = bgzf::Reader::from_path(input)?;
+    let mut writer = bgzf::Writer::from_path_with_level(output, lvl)?;
 
-    let reader_file = File::open(&input)?;
-    let writer_file = File::create(&output)?;
-    if input_format == FileFormat::Gzip {
-        let mut reader = BGZFMultiThreadReader::new(reader_file)?;
-        if zip {
-            let mut writer = BGZFMultiThreadWriter::new(writer_file, lvl);
-            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
-        } else {
-            let mut writer = BufWriter::new(writer_file);
-            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
-        }
-    } else {
-        let mut reader = BufReader::new(reader_file);
-        if zip {
-            let mut writer = BGZFMultiThreadWriter::new(writer_file, lvl);
-            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
-        } else {
-            let mut writer = BufWriter::new(writer_file);
-            process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
-        }
+    let tpool = ThreadPool::new(n_threads - 1)?;
+    if n_threads > 1 {
+        reader.set_thread_pool(&tpool)?;
+        writer.set_thread_pool(&tpool)?;
     }
+    process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
 }
