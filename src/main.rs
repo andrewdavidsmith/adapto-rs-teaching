@@ -30,9 +30,10 @@
 /// or not. Extra threads help with compressing output and
 /// decompressing input.
 use clap::Parser;
+use file_format::FileFormat;
 use num_cpus;
-use std::path::Path;
-use std::process::ExitCode;
+use std::error::Error;
+use std::str::from_utf8;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -66,7 +67,7 @@ struct Args {
     #[arg(short, long, default_value_t = true)]
     keep_prefix: bool,
 
-    /// Zip output files as BGZF format (not implemented)
+    /// Zip output files as BGZF format
     #[arg(short, long)]
     zip: bool,
 
@@ -97,17 +98,15 @@ fn is_readable(filename: &String) -> bool {
     }
 }
 
-fn main() -> ExitCode {
+fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     if args.threads <= 0 {
-        eprintln!("number of threads must be positive");
-        return ExitCode::FAILURE;
+        return Err("number of threads must be positive")?;
     }
 
     if args.buffer_size <= 0 {
-        eprintln!("buffer size must be positive");
-        return ExitCode::FAILURE;
+        return Err("buffer size must be positive")?;
     }
 
     let adaptor = args.adaptor.unwrap().into_bytes();
@@ -119,78 +118,57 @@ fn main() -> ExitCode {
 
     if args.verbose {
         eprintln!("input file: {}", args.fastq);
+        eprintln!("input file format: {}", FileFormat::from_file(&args.fastq)?);
         eprintln!("output file: {}", args.out);
         eprintln!("quality score cutoff: {}", args.qual_cutoff);
-        use std::str::from_utf8;
-        eprintln!("adaptor sequence: {}", from_utf8(&adaptor).unwrap());
-        eprintln!(
-            "keep prefix: {}",
-            if args.keep_prefix { "no" } else { "no" }
-        );
-        eprintln!("compress output: {}", if args.zip { "yes" } else { "no" });
+        eprintln!("adaptor sequence: {}", from_utf8(&adaptor)?);
+        eprintln!("keep prefix: {}", args.keep_prefix);
+        eprintln!("compress output: {}", args.zip);
         eprintln!("threads requested: {}", args.threads);
         eprintln!("detected cpu cores: {}", num_cpus::get());
         eprintln!("buffer size: {}", args.buffer_size);
         match (&args.pfastq, &args.pout) {
             (Some(x), Some(y)) => {
-                eprintln!("input file2: {}", x);
-                eprintln!("output file2: {}", y);
+                eprintln!("input2 file: {}", x);
+                eprintln!("input2 file format: {}", FileFormat::from_file(&x)?);
+                eprintln!("output2 file: {}", y);
             }
             (Some(_), None) | (None, Some(_)) => {
-                eprintln!("paired end requires two input and output files");
-                return ExitCode::FAILURE;
+                Err("paired end requires two input and output files")?;
             }
-            (None, None) => {}
+            (None, None) => (),
         }
     }
 
+    // ADS: do this 1st so we don't waste time on end2 if end1 is bad
     if !is_readable(&args.fastq) {
-        eprintln!("input file not readable: {}", args.fastq);
-        return ExitCode::FAILURE;
-    }
-
-    if Path::new(&args.out).exists() {
-        eprintln!("output file already exists: {}", args.out);
+        return Err(format!("input file not readable: {}", args.fastq))?;
     }
 
     use adapto_rs::remove_adaptors;
 
     if let (Some(pfastq), Some(pout)) = (args.pfastq, args.pout) {
         if !is_readable(&pfastq) {
-            eprintln!("input file not readable: {}", pfastq);
-            return ExitCode::FAILURE;
+            return Err(format!("input file not readable: {}", pfastq))?;
         }
-        if args.verbose && Path::new(&pout).exists() {
-            eprintln!("output file already exists: {}", pout);
-        }
-        match remove_adaptors(
+        remove_adaptors(
             args.zip,
+            args.threads,
             args.buffer_size,
             &adaptor,
             &pfastq,
             &pout,
             args.qual_cutoff,
-        ) {
-            Err(e) => {
-                eprintln!("error processing end two: {}", e);
-                return ExitCode::FAILURE;
-            },
-            Ok(_) => (),
-        };
+        )?;
     }
 
-    match remove_adaptors(
+    remove_adaptors(
         args.zip,
+        args.threads,
         args.buffer_size,
         &adaptor,
         &args.fastq,
         &args.out,
         args.qual_cutoff,
-    ) {
-        Err(e) => {
-            eprintln!("error processing end one: {}", e);
-            ExitCode::FAILURE
-        },
-        Ok(_) => ExitCode::SUCCESS
-    }
+    )
 }
