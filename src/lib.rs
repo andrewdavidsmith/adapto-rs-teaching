@@ -252,6 +252,7 @@ impl FQRec {
     }
 }
 
+#[inline(always)]
 fn get_next_record(buf: &mut [u8], cursor: &mut usize, filled: usize) -> FQRec {
     // ADS: here is where we should detect malformed records
     let n = *cursor;
@@ -308,7 +309,7 @@ fn process_reads<R: Read, W: Write>(
 
         // find end-points of trimmed reads
         recs.par_iter_mut()
-            .for_each(|x| x.process(&adaptor, &sp, cutoff, &buf));
+            .for_each(|fq_rec| fq_rec.process(&adaptor, &sp, cutoff, &buf));
 
         /* ADS: could do separately: make record a contiguous chunk */
         // recs.iter_mut().for_each(|x| x.compress(&buf));
