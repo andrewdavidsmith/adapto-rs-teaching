@@ -11,3 +11,4 @@ rayon = "1.7"
 num_cpus = { version = "1.16.0", default-features = false }
 file-format = { version = "0.23.0", default-features = false, features = ["reader-zip", "reader-txt"] }
 rust-htslib = { version = "0.44.1", default-features = false }
+clap-num = "1.1.1"
