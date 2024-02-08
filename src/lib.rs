@@ -25,58 +25,43 @@
 
 use rayon::prelude::*;
 use std::cmp::{max, min};
+use std::error::Error;
 use std::io::{Read, Write};
 use std::ptr;
-use std::error::Error;
 
 // the rust_htslib crate is not ideal for our purpose
 use rust_htslib::bgzf;
 use rust_htslib::bgzf::CompressionLevel as CompLvl;
 use rust_htslib::tpool::ThreadPool;
 
-/// The prefix function for the KMP algorithm
-fn kmp_prefix_function(p: &[u8]) -> Vec<usize> {
-    let n = p.len();
-    let mut sp = vec![0 as usize; n];
-    let mut k = 0usize;
-    for i in 1..n {
-        while k > 0 && p[k] != p[i] {
-            k = sp[k - 1];
-        }
-        if p[k] == p[i] {
-            k += 1;
-        }
-        sp[i] = k;
-    }
-    sp
-}
-
-/// The KMP algorithm that returns the first full match or the start
-/// of any suffix match to the pattern (i.e. adaptor).
-fn kmp(adaptor: &[u8], sp: &[usize], read: &[u8], m: usize) -> usize {
+/// Just the naive algorithm for string matching with bounded
+/// mismatches.
+fn naive_matching(
+    adaptor: &[u8],
+    read: &[u8],
+    m: usize,
+    min_frac: f32,
+    min_letters: usize,
+) -> usize {
     let n = adaptor.len();
-    let mut j: usize = 0;
-    let mut i: usize = 0;
-    while i < m {
-        // look for the longest prefix of P that is the same as a
-        // suffix of P[1..j - 1] AND has a different next character
-        while j > 0 && adaptor[j] != read[i] {
-            j = sp[j - 1];
-        }
-        // check if the character matches
-        if adaptor[j] == read[i] {
+    let i_lim = m + 1 - min_letters;
+    for i in 0..i_lim {
+        let j_lim = min(m - i, n as usize);
+        let min_match = (min_frac * j_lim as f32).ceil() as usize;
+        let d_max = j_lim - min_match;
+        let mut d: usize = 0;
+        let mut j: usize = 0;
+        while d <= d_max && j < j_lim {
+            if read[i + j] != adaptor[j] {
+                d += 1;
+            }
             j += 1;
         }
-        // if we have already successfully compared all positions in
-        // P, then we have found a match
-        if j == n {
-            return (i + 1) - n;
+        if d <= d_max {
+            return i;
         }
-        i += 1;
     }
-    // if we have not found a full match, then return the maximum
-    // prefix match of the pattern
-    i - j
+    m
 }
 
 /// Find the positions in the read of the first non-N and last non-N.
@@ -189,20 +174,27 @@ impl FQRec {
     fn process(
         &mut self,
         adaptor: &[u8],
-        sp: &Vec<usize>,
         cutoff: u8,
+        min_frac: f32,
+        min_letters: usize,
         buf: &Vec<u8>,
     ) {
         let seqlen = self.stop;
-        let (qstart, qstop) =
-            qual_trim(&buf[self.q..self.q + seqlen], 0, cutoff as i32);
+        let (qstart, qstop) = qual_trim(&buf[self.q..self.q + seqlen], 0, cutoff as i32);
         // consecutive N values at both ends
         let (nstart, nstop) = trim_n_ends(&buf[self.r..self.r + seqlen]);
         // so no N or low qual bases can interfere with adaptor
         self.stop = min(qstop, nstop);
+
         // find the adaptor at the 3' end
-        let adaptor_start =
-            kmp(adaptor, &sp, &buf[self.r..self.r + seqlen], self.stop);
+        let adaptor_start = naive_matching(
+            adaptor,
+            &buf[self.r..self.r + seqlen],
+            self.stop,
+            min_frac,
+            min_letters,
+        );
+
         self.stop = min(self.stop, adaptor_start);
         let (_, nstop) = trim_n_ends(&buf[self.r..self.r + self.stop]);
         self.stop = min(self.stop, nstop);
@@ -281,9 +273,9 @@ fn process_reads<R: Read, W: Write>(
     reader: &mut R,
     mut writer: &mut W,
     cutoff: u8,
+    min_frac: f32,
+    min_letters: usize,
 ) -> Result<(), Box<dyn Error>> {
-    let sp = kmp_prefix_function(adaptor);
-
     let mut buf: Vec<u8> = vec![b'\0'; buffer_size];
     let mut filled = 0usize;
     let mut cursor = 0usize;
@@ -309,7 +301,7 @@ fn process_reads<R: Read, W: Write>(
 
         // find end-points of trimmed reads
         recs.par_iter_mut()
-            .for_each(|fq_rec| fq_rec.process(&adaptor, &sp, cutoff, &buf));
+            .for_each(|fq_rec| fq_rec.process(&adaptor, cutoff, min_frac, min_letters, &buf));
 
         /* ADS: could do separately: make record a contiguous chunk */
         // recs.iter_mut().for_each(|x| x.compress(&buf));
@@ -334,6 +326,8 @@ pub fn remove_adaptors(
     input: &String,
     output: &String,
     cutoff: u8,
+    min_frac: f32,
+    min_letters: usize,
 ) -> Result<(), Box<dyn Error>> {
     let lvl = match zip {
         true => CompLvl::Default,
@@ -347,5 +341,13 @@ pub fn remove_adaptors(
         reader.set_thread_pool(&tpool)?;
         writer.set_thread_pool(&tpool)?;
     }
-    process_reads(buf_sz, adaptor, &mut reader, &mut writer, cutoff)
+    process_reads(
+        buf_sz,
+        adaptor,
+        &mut reader,
+        &mut writer,
+        cutoff,
+        min_frac,
+        min_letters,
+    )
 }
