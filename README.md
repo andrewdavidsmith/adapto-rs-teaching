@@ -1,15 +1,21 @@
 # adapto-rs
 
-Remove adaptors from short-read sequencing data. I needed a faster
-tool to remove adaptor sequences from reads for my own in my own data
-analysis. I wrote this in Rust because I wanted to experiment with the
-libraries for parallelism. It turns out this application does not need
-much in the way of parallelism. I think this code is reasonably fast.
+The code in this repo is for teaching. I decided to use this repo for
+some code I wanted to show students. I will add features to a
+different adaptor trimming tool, but in this repo I will try to keep
+the code as small as possible so I can point quickly to some important
+parts.
 
-I use the Knuth-Morris-Pratt algorithm to do the pattern matching
-required for finding the exact match of the adaptor sequence with each
-read. I think the approach is good, and it also works nicely to
-automatically find the longest suffix-prefix match of read-adaptor.
+`adapto-rs` removes adaptors from short-read sequencing data. I wrote
+this in Rust initially because I wanted to experiment with the
+libraries for parallelism. It turned out this application does not
+need much in the way of parallelism. I think this code is reasonably
+fast.
+
+For students: I use the Knuth-Morris-Pratt algorithm to do the pattern
+matching required for finding the exact match of the adaptor sequence
+with each read. I think the approach is good, and it also works nicely
+to automatically find the longest suffix-prefix match of read-adaptor.
 The KMP algorithm is basically the same thing as a compiled regular
 expression, but tailored for a regular expression that is simply a
 string.
